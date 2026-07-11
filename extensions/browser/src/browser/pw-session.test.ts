@@ -165,47 +165,98 @@ describe("pw-session role refs cache", () => {
     expect(mocks.frameLocator).toHaveBeenCalledWith("iframe#main");
   });
 
-  it("does not restore cached refs when navGen mismatches (post-navigation)", () => {
+  it("blocks restore after navigation (target-scoped navGen)", () => {
     const cdpUrl = "http://127.0.0.1:9222";
     const targetId = "t1";
-
-    rememberRoleRefsForTarget({
-      cdpUrl,
-      targetId,
-      refs: { e1: { role: "button", name: "OK" } },
-      navGen: 0,
-    });
 
     const { page, handlers, mainFrame } = fakePage();
-    const state = ensurePageState(page);
-    expect(state.roleRefNavGen).toBe(0);
-
-    handlers.get("framenavigated")?.[0]?.(mainFrame);
-    expect(state.roleRefNavGen).toBe(1);
-
-    restoreRoleRefsForTarget({ cdpUrl, targetId, page });
-    expect(state.roleRefs).toBeUndefined();
-  });
-
-  it("restores cached refs when navGen matches (pre-navigation)", () => {
-    const cdpUrl = "http://127.0.0.1:9222";
-    const targetId = "t1";
-
-    const { page } = fakePage();
-    const state = ensurePageState(page);
-
-    rememberRoleRefsForTarget({
+    // Snapshot stores refs at target gen 0
+    storeRoleRefsForTarget({
+      page,
       cdpUrl,
       targetId,
       refs: { e1: { role: "button", name: "OK" } },
-      navGen: state.roleRefNavGen,
+      mode: "role",
     });
 
-    state.roleRefs = undefined;
+    // Navigate clears refs and bumps target gen to 1
+    handlers.get("framenavigated")?.[0]?.(mainFrame);
+    expect(ensurePageState(page).roleRefs).toBeUndefined();
 
+    // Restore must reject cached gen-0 refs (target is now at gen 1)
     restoreRoleRefsForTarget({ cdpUrl, targetId, page });
-    expect(state.roleRefs).toBeDefined();
-    expect(state.roleRefs!.e1.role).toBe("button");
+    expect(ensurePageState(page).roleRefs).toBeUndefined();
+  });
+
+  it("allows restore for a replacement Page when target gen matches", () => {
+    const cdpUrl = "http://127.0.0.1:9222";
+    const targetId = "t1";
+
+    // Page A: snapshot stores refs at target gen 0
+    const { page: pageA } = fakePage();
+    storeRoleRefsForTarget({
+      page: pageA,
+      cdpUrl,
+      targetId,
+      refs: { e1: { role: "button", name: "OK" } },
+      mode: "role",
+    });
+
+    // Page B (replacement, same target): restore must succeed (both gen 0)
+    const { page: pageB, mocks } = fakePage();
+    restoreRoleRefsForTarget({ cdpUrl, targetId, page: pageB });
+    expect(ensurePageState(pageB).roleRefs).toBeDefined();
+
+    // Verify refLocator works with restored refs
+    refLocator(pageB, "e1");
+    expect(mocks.getByRole).toHaveBeenCalled();
+  });
+
+  it("rejects stale cached refs for a replacement Page after target navigation", () => {
+    const cdpUrl = "http://127.0.0.1:9222";
+    const targetId = "t1";
+
+    // Page A: snapshot stores refs at target gen 0
+    const { page: pageA, handlers, mainFrame } = fakePage();
+    storeRoleRefsForTarget({
+      page: pageA,
+      cdpUrl,
+      targetId,
+      refs: { e1: { role: "button", name: "PageA-Btn" } },
+      mode: "role",
+    });
+
+    // Navigate on Page A → target gen becomes 1, refs cleared
+    handlers.get("framenavigated")?.[0]?.(mainFrame);
+    expect(ensurePageState(pageA).roleRefs).toBeUndefined();
+
+    // Page B (replacement, same target): restore must reject stale gen-0 cache
+    const { page: pageB } = fakePage();
+    restoreRoleRefsForTarget({ cdpUrl, targetId, page: pageB });
+    expect(ensurePageState(pageB).roleRefs).toBeUndefined();
+  });
+
+  it("restores fresh post-navigation cache for a replacement Page", () => {
+    const cdpUrl = "http://127.0.0.1:9222";
+    const targetId = "t1";
+
+    // Page A: navigate, then snapshot on the new page caches at target gen 1
+    const { page: pageA, handlers, mainFrame } = fakePage();
+    handlers.get("framenavigated")?.[0]?.(mainFrame); // target gen → 1
+
+    storeRoleRefsForTarget({
+      page: pageA,
+      cdpUrl,
+      targetId,
+      refs: { e1: { role: "heading", name: "PageB-Title" } },
+      mode: "aria",
+    });
+
+    // Page B (replacement): restore must succeed (both gen 1)
+    const { page: pageB } = fakePage();
+    restoreRoleRefsForTarget({ cdpUrl, targetId, page: pageB });
+    expect(ensurePageState(pageB).roleRefs).toBeDefined();
+    expect(ensurePageState(pageB).roleRefs!.e1.name).toBe("PageB-Title");
   });
 });
 
