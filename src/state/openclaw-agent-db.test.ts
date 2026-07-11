@@ -665,6 +665,19 @@ describe("openclaw agent database", () => {
         env,
       }),
     ).toThrow(/run openclaw doctor --fix/);
+
+    fs.rmSync(stateDatabasePath);
+    const reopened = openOpenClawAgentDatabase({
+      agentId: "worker-1",
+      env,
+    });
+    expect(reopened.db.isOpen).toBe(true);
+    expect(listOpenClawRegisteredAgentDatabases({ env })).toEqual([
+      expect.objectContaining({
+        agentId: "worker-1",
+        path: reopened.path,
+      }),
+    ]);
   });
 
   it("keys explicit relative paths by resolved database pathname", () => {
@@ -815,6 +828,16 @@ describe("openclaw agent database", () => {
     ]);
     expect(disposeOpenClawAgentDatabaseByPath(first.path, { env })).toBe(false);
     expect(second.db.isOpen).toBe(true);
+
+    const reopened = openOpenClawAgentDatabase({
+      agentId: "worker-1",
+      env,
+      path: first.path,
+    });
+    expect(listOpenClawRegisteredAgentDatabases({ env })).toEqual([
+      expect.objectContaining({ agentId: "worker-1", path: reopened.path }),
+      expect.objectContaining({ agentId: "worker-2", path: second.path }),
+    ]);
   });
 
   it("serializes concurrent ownership claims for one unowned database", async () => {
@@ -1177,9 +1200,7 @@ describe("openclaw agent database", () => {
       env: { OPENCLAW_STATE_DIR: stateDir },
     });
 
-    expect(readSqliteNumberPragma(database.db, "user_version")).toBe(
-      OPENCLAW_AGENT_SCHEMA_VERSION,
-    );
+    expect(readSqliteNumberPragma(database.db, "user_version")).toBe(OPENCLAW_AGENT_SCHEMA_VERSION);
     const session = database.db
       .prepare(
         `
