@@ -663,6 +663,9 @@ export function rememberRoleRefsForTarget(opts: {
     if (first.done) {
       break;
     }
+    // Evict the target generation alongside the role-ref cache entry
+    // so the unbounded navGenerationByTarget map does not leak memory.
+    navGenerationByTarget.delete(first.value);
     roleRefsByTarget.delete(first.value);
   }
 }

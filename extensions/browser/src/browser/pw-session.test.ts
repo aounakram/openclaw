@@ -258,6 +258,41 @@ describe("pw-session role refs cache", () => {
     expect(ensurePageState(pageB).roleRefs).toBeDefined();
     expect(ensurePageState(pageB).roleRefs!.e1.name).toBe("PageB-Title");
   });
+
+  it("evicts target generation alongside role-ref cache eviction", () => {
+    const cdpUrl = "http://127.0.0.1:9222";
+
+    // Bump generation for a target by navigating
+    const { page: pageA, handlers, mainFrame } = fakePage();
+    storeRoleRefsForTarget({
+      page: pageA,
+      cdpUrl,
+      targetId: "keeper",
+      refs: { e1: { role: "button", name: "Keeper" } },
+      mode: "role",
+    });
+    handlers.get("framenavigated")?.[0]?.(mainFrame); // target gen → 1
+
+    // Fill the cache past MAX_ROLE_REFS_CACHE (50) to evict the oldest entry
+    // Each storeRoleRefsForTarget call adds one entry via rememberRoleRefsForTarget
+    for (let i = 0; i < 55; i++) {
+      const { page: filler } = fakePage();
+      storeRoleRefsForTarget({
+        page: filler,
+        cdpUrl,
+        targetId: `filler-${i}`,
+        refs: { e1: { role: "button", name: `F${i}` } },
+        mode: "role",
+      });
+    }
+
+    // The "keeper" entry should have been evicted (it was first in)
+    // After eviction, a new restore for "keeper" should see gen 0 (default)
+    const { page: pageB } = fakePage();
+    restoreRoleRefsForTarget({ cdpUrl, targetId: "keeper", page: pageB });
+    // Evicted → cache miss → restore is a no-op
+    expect(ensurePageState(pageB).roleRefs).toBeUndefined();
+  });
 });
 
 describe("pw-session ensurePageState", () => {
