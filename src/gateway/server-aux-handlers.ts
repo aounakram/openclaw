@@ -103,8 +103,8 @@ export function createGatewayAuxHandlers(params: {
   const execApprovalManager = new ExecApprovalManager<ExecApprovalRequestPayload>({
     approvalKind: "exec",
     persistence: approvalPersistence,
-    resolveAllowedDecisions: resolveExecApprovalRequestAllowedDecisions,
     resolveAudienceSessionKeys: resolveApprovalSessionAudience,
+    resolveAllowedDecisions: resolveExecApprovalRequestAllowedDecisions,
     onError: (error, context) => {
       params.log.error?.(
         `${context.approvalKind} approval ${context.operation} failed for ${context.approvalId}: ${String(error)}`,
@@ -127,8 +127,8 @@ export function createGatewayAuxHandlers(params: {
   const pluginApprovalManager = new ExecApprovalManager<PluginApprovalRequestPayload>({
     approvalKind: "plugin",
     persistence: approvalPersistence,
-    resolveAllowedDecisions: (request) => resolvePluginApprovalRequestAllowedDecisions(request),
     resolveAudienceSessionKeys: resolveApprovalSessionAudience,
+    resolveAllowedDecisions: (request) => resolvePluginApprovalRequestAllowedDecisions(request),
     onError: (error, context) => {
       params.log.error?.(
         `${context.approvalKind} approval ${context.operation} failed for ${context.approvalId}: ${String(error)}`,

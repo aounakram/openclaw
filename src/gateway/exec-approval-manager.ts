@@ -90,6 +90,9 @@ export type ExecApprovalManagerOptions<TPayload> = {
   approvalKind?: OperatorApprovalKind;
   persistence?: OperatorApprovalPersistenceRuntime;
   resolveAllowedDecisions?: (request: TPayload) => readonly ExecApprovalDecision[];
+  /** Session-lineage audience policy is gateway-owned and injected; importing
+   * it here would close an agents->gateway barrel cycle. Absent resolver seeds
+   * only the raising session. */
   resolveAudienceSessionKeys?: (sourceSessionKey: string) => string[];
   onError?: (
     error: Error,
@@ -257,14 +260,14 @@ export class ExecApprovalManager<TPayload = ExecApprovalRequestPayload> {
       const source = resolveApprovalSource(record.request);
       let audienceSessionKeys: string[] = [];
       if (source.sessionKey) {
-        audienceSessionKeys = [source.sessionKey];
-        if (this.options.resolveAudienceSessionKeys) {
-          try {
-            audienceSessionKeys = this.options.resolveAudienceSessionKeys(source.sessionKey);
-          } catch {
-            // Lineage is routing metadata, not an approval safety prerequisite.
-            // Preserve at least the source audience when session stores are unavailable.
-          }
+        try {
+          audienceSessionKeys = this.options.resolveAudienceSessionKeys?.(source.sessionKey) ?? [
+            source.sessionKey,
+          ];
+        } catch {
+          // Lineage is routing metadata, not an approval safety prerequisite.
+          // Preserve at least the source audience when session stores are unavailable.
+          audienceSessionKeys = [source.sessionKey];
         }
       }
       const inserted = insertOperatorApproval({
