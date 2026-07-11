@@ -855,8 +855,10 @@ export function ensurePageState(page: Page): PageState {
       if (frame === page.mainFrame()) {
         // Bump the target-scoped generation so replacement Page objects
         // for the same (cdpUrl, targetId) share the same lifecycle.
+        // Only bump if the target is still in the cache — evicted targets
+        // must not recreate orphan navGenerationByTarget entries.
         const key = pageTargetKeys.get(page);
-        if (key) {
+        if (key && roleRefsByTarget.has(key)) {
           navGenerationByTarget.set(key, (navGenerationByTarget.get(key) ?? 0) + 1);
         }
         state.roleRefs = undefined;

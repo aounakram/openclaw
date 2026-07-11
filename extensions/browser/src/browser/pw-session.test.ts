@@ -293,6 +293,45 @@ describe("pw-session role refs cache", () => {
     // Evicted → cache miss → restore is a no-op
     expect(ensurePageState(pageB).roleRefs).toBeUndefined();
   });
+
+  it("prevents navigation from recreating navGen for evicted targets", () => {
+    const cdpUrl = "http://127.0.0.1:9222";
+
+    // Create a page that tracks target "evictee"
+    const { page, handlers, mainFrame } = fakePage();
+    storeRoleRefsForTarget({
+      page,
+      cdpUrl,
+      targetId: "evictee",
+      refs: { e1: { role: "button", name: "Evictee" } },
+      mode: "role",
+    });
+    // Navigate once — target gen becomes 1
+    handlers.get("framenavigated")?.[0]?.(mainFrame);
+    expect(ensurePageState(page).roleRefs).toBeUndefined();
+
+    // Evict "evictee" by filling the cache
+    for (let i = 0; i < 55; i++) {
+      const { page: filler } = fakePage();
+      storeRoleRefsForTarget({
+        page: filler,
+        cdpUrl,
+        targetId: `filler-${i}`,
+        refs: { e1: { role: "button", name: `F${i}` } },
+        mode: "role",
+      });
+    }
+
+    // Navigate again on the original page — still tracks "evictee" via pageTargetKeys
+    // but "evictee" was evicted from roleRefsByTarget, so no orphan navGen entry
+    // should be created.
+    handlers.get("framenavigated")?.[0]?.(mainFrame);
+
+    // Verify "evictee" is no longer in the cache (evicted)
+    const { page: freshPage } = fakePage();
+    restoreRoleRefsForTarget({ cdpUrl, targetId: "evictee", page: freshPage });
+    expect(ensurePageState(freshPage).roleRefs).toBeUndefined();
+  });
 });
 
 describe("pw-session ensurePageState", () => {
