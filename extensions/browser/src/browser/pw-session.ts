@@ -183,6 +183,9 @@ type PageState = {
   roleRefs?: Record<string, { role: string; name?: string; nth?: number; domMarker?: boolean }>;
   roleRefsMode?: "role" | "aria";
   roleRefsFrameSelector?: string;
+  /** Incremented on each main-frame navigation so cached refs from
+   *  previous pages are not restored after the URL changes. */
+  roleRefNavGen: number;
 };
 
 type RoleRefs = NonNullable<PageState["roleRefs"]>;
@@ -190,6 +193,9 @@ type RoleRefsCacheEntry = {
   refs: RoleRefs;
   frameSelector?: string;
   mode?: NonNullable<PageState["roleRefsMode"]>;
+  /** The roleRefNavGen value when these refs were stored.
+   *  Mismatch means the page has navigated since — refs are stale. */
+  navGen: number;
 };
 
 type ContextState = {
@@ -633,6 +639,7 @@ export function rememberRoleRefsForTarget(opts: {
   refs: RoleRefs;
   frameSelector?: string;
   mode?: NonNullable<PageState["roleRefsMode"]>;
+  navGen: number;
 }): void {
   const targetId = normalizeOptionalString(opts.targetId) ?? "";
   if (!targetId) {
@@ -642,6 +649,7 @@ export function rememberRoleRefsForTarget(opts: {
     refs: opts.refs,
     ...(opts.frameSelector ? { frameSelector: opts.frameSelector } : {}),
     ...(opts.mode ? { mode: opts.mode } : {}),
+    navGen: opts.navGen,
   });
   while (roleRefsByTarget.size > MAX_ROLE_REFS_CACHE) {
     const first = roleRefsByTarget.keys().next();
@@ -675,6 +683,7 @@ export function storeRoleRefsForTarget(opts: {
     refs: opts.refs,
     frameSelector: opts.frameSelector,
     mode: opts.mode,
+    navGen: state.roleRefNavGen,
   });
 }
 
@@ -694,6 +703,10 @@ export function restoreRoleRefsForTarget(opts: {
   }
   const state = ensurePageState(opts.page);
   if (state.roleRefs) {
+    return;
+  }
+  // Do not restore if the page has navigated since the cached snapshot.
+  if (cached.navGen !== state.roleRefNavGen) {
     return;
   }
   state.roleRefs = cached.refs;
@@ -721,6 +734,7 @@ export function ensurePageState(page: Page): PageState {
     pendingDialogs: [],
     recentDialogs: [],
     dialogAbortControllers: new Set(),
+    roleRefNavGen: 0,
   };
   pageStates.set(page, state);
 
@@ -817,6 +831,17 @@ export function ensurePageState(page: Page): PageState {
       actionCapture?.pending.push(managedSave);
       for (const finish of actionCapture?.waiters.splice(0) ?? []) {
         finish();
+      }
+    });
+    page.on("framenavigated", (frame) => {
+      // Clear role refs on main-frame navigation so stale refs from the
+      // previous page are never used to locate elements on the new page.
+      // Subframe navigations do not invalidate the main-page snapshot.
+      if (frame === page.mainFrame()) {
+        state.roleRefNavGen++;
+        state.roleRefs = undefined;
+        state.roleRefsMode = undefined;
+        state.roleRefsFrameSelector = undefined;
       }
     });
     page.on("close", () => {

@@ -12,6 +12,7 @@ import {
   refLocator,
   rememberRoleRefsForTarget,
   restoreRoleRefsForTarget,
+  storeRoleRefsForTarget,
 } from "./pw-session.js";
 import { BROWSER_REF_MARKER_ATTRIBUTE } from "./pw-session.page-cdp.js";
 
@@ -29,6 +30,7 @@ afterEach(() => {
 function fakePage(): {
   page: Page;
   handlers: Map<string, Array<(...args: unknown[]) => void>>;
+  mainFrame: { url: () => string };
   mocks: {
     on: ReturnType<typeof vi.fn>;
     getByRole: ReturnType<typeof vi.fn>;
@@ -58,15 +60,17 @@ function fakePage(): {
   }));
   const locator = vi.fn(() => ({ nth: vi.fn(() => ({ ok: true })) }));
 
+  const mainFrame = { url: () => "https://test.example.com" };
   const page = {
     on,
     off,
     getByRole,
     frameLocator,
     locator,
+    mainFrame: () => mainFrame,
   } as unknown as Page;
 
-  return { page, handlers, mocks: { on, getByRole, frameLocator, locator } };
+  return { page, handlers, mainFrame, mocks: { on, getByRole, frameLocator, locator } };
 }
 
 function firstSavePath(saveAs: MutableDownload["saveAs"]): string {
@@ -151,6 +155,7 @@ describe("pw-session role refs cache", () => {
       targetId,
       refs: { e1: { role: "button", name: "OK" } },
       frameSelector: "iframe#main",
+      navGen: 0,
     });
 
     const { page, mocks } = fakePage();
@@ -158,6 +163,49 @@ describe("pw-session role refs cache", () => {
 
     refLocator(page, "e1");
     expect(mocks.frameLocator).toHaveBeenCalledWith("iframe#main");
+  });
+
+  it("does not restore cached refs when navGen mismatches (post-navigation)", () => {
+    const cdpUrl = "http://127.0.0.1:9222";
+    const targetId = "t1";
+
+    rememberRoleRefsForTarget({
+      cdpUrl,
+      targetId,
+      refs: { e1: { role: "button", name: "OK" } },
+      navGen: 0,
+    });
+
+    const { page, handlers, mainFrame } = fakePage();
+    const state = ensurePageState(page);
+    expect(state.roleRefNavGen).toBe(0);
+
+    handlers.get("framenavigated")?.[0]?.(mainFrame);
+    expect(state.roleRefNavGen).toBe(1);
+
+    restoreRoleRefsForTarget({ cdpUrl, targetId, page });
+    expect(state.roleRefs).toBeUndefined();
+  });
+
+  it("restores cached refs when navGen matches (pre-navigation)", () => {
+    const cdpUrl = "http://127.0.0.1:9222";
+    const targetId = "t1";
+
+    const { page } = fakePage();
+    const state = ensurePageState(page);
+
+    rememberRoleRefsForTarget({
+      cdpUrl,
+      targetId,
+      refs: { e1: { role: "button", name: "OK" } },
+      navGen: state.roleRefNavGen,
+    });
+
+    state.roleRefs = undefined;
+
+    restoreRoleRefsForTarget({ cdpUrl, targetId, page });
+    expect(state.roleRefs).toBeDefined();
+    expect(state.roleRefs!.e1.role).toBe("button");
   });
 });
 
@@ -690,5 +738,138 @@ describe("pw-session ensurePageState", () => {
     expect(state2.console).toStrictEqual([]);
     expect(state2.errors).toStrictEqual([]);
     expect(state2.requests).toStrictEqual([]);
+  });
+
+  it("clears role refs on main-frame navigation (role mode)", () => {
+    const { page, handlers, mainFrame } = fakePage();
+    const state = ensurePageState(page);
+
+    storeRoleRefsForTarget({
+      page,
+      cdpUrl: "http://127.0.0.1:9222",
+      targetId: "t1",
+      refs: { e1: { role: "button", name: "OK" }, e2: { role: "link", name: "Home" } },
+      mode: "role",
+    });
+    expect(state.roleRefs).toBeDefined();
+    expect(Object.keys(state.roleRefs!)).toHaveLength(2);
+    expect(state.roleRefsMode).toBe("role");
+
+    handlers.get("framenavigated")?.[0]?.(mainFrame);
+
+    expect(state.roleRefs).toBeUndefined();
+    expect(state.roleRefsMode).toBeUndefined();
+    expect(state.roleRefsFrameSelector).toBeUndefined();
+    expect(() => refLocator(page, "e1")).toThrow(/Unknown ref/);
+  });
+
+  it("clears role refs on main-frame navigation (aria mode)", () => {
+    const { page, handlers, mainFrame } = fakePage();
+    const state = ensurePageState(page);
+
+    storeRoleRefsForTarget({
+      page,
+      cdpUrl: "http://127.0.0.1:9222",
+      targetId: "t1",
+      refs: { e1: { role: "button", name: "Save" } },
+      mode: "aria",
+    });
+    expect(state.roleRefs).toBeDefined();
+    expect(state.roleRefsMode).toBe("aria");
+
+    handlers.get("framenavigated")?.[0]?.(mainFrame);
+
+    expect(state.roleRefs).toBeUndefined();
+    expect(state.roleRefsMode).toBeUndefined();
+    expect(() => refLocator(page, "e1")).toThrow(/Unknown ref/);
+  });
+
+  it("clears roleRefsFrameSelector on main-frame navigation", () => {
+    const { page, handlers, mainFrame } = fakePage();
+    const state = ensurePageState(page);
+
+    storeRoleRefsForTarget({
+      page,
+      cdpUrl: "http://127.0.0.1:9222",
+      targetId: "t1",
+      refs: { e1: { role: "button", name: "OK" } },
+      frameSelector: "iframe#content",
+      mode: "role",
+    });
+    expect(state.roleRefsFrameSelector).toBe("iframe#content");
+
+    handlers.get("framenavigated")?.[0]?.(mainFrame);
+
+    expect(state.roleRefsFrameSelector).toBeUndefined();
+  });
+
+  it("preserves role refs on subframe navigation", () => {
+    const { page, handlers } = fakePage();
+    const state = ensurePageState(page);
+
+    storeRoleRefsForTarget({
+      page,
+      cdpUrl: "http://127.0.0.1:9222",
+      targetId: "t1",
+      refs: { e1: { role: "button", name: "MainBtn" } },
+      mode: "role",
+    });
+    expect(Object.keys(state.roleRefs!)).toHaveLength(1);
+
+    const subframe = { url: () => "https://ads.example.com/widget" };
+    handlers.get("framenavigated")?.[0]?.(subframe);
+
+    expect(state.roleRefs).toBeDefined();
+    expect(Object.keys(state.roleRefs!)).toHaveLength(1);
+  });
+
+  it("allows new snapshot to store fresh refs after navigation clear", () => {
+    const { page, handlers, mainFrame } = fakePage();
+    const state = ensurePageState(page);
+
+    storeRoleRefsForTarget({
+      page,
+      cdpUrl: "http://127.0.0.1:9222",
+      targetId: "t1",
+      refs: { e1: { role: "button", name: "PageA-Btn" } },
+      mode: "role",
+    });
+
+    handlers.get("framenavigated")?.[0]?.(mainFrame);
+    expect(state.roleRefs).toBeUndefined();
+
+    storeRoleRefsForTarget({
+      page,
+      cdpUrl: "http://127.0.0.1:9222",
+      targetId: "t1",
+      refs: { e1: { role: "heading", name: "PageB Title" } },
+      mode: "aria",
+    });
+    expect(state.roleRefs).toBeDefined();
+    expect(state.roleRefs!.e1.role).toBe("heading");
+    expect(state.roleRefsMode).toBe("aria");
+  });
+
+  it("registers framenavigated listener on ensurePageState", () => {
+    const handlers2 = new Map<string, Array<(...args: unknown[]) => void>>();
+    const page2 = {
+      on: (event: string, cb: (...args: unknown[]) => void) => {
+        const list = handlers2.get(event) ?? [];
+        list.push(cb);
+        handlers2.set(event, list);
+      },
+      off: () => {},
+      getByRole: () => ({ nth: () => ({ ok: true }) }),
+      frameLocator: () => ({
+        getByRole: () => ({ nth: () => ({ ok: true }) }),
+        locator: () => ({ nth: () => ({ ok: true }) }),
+      }),
+      locator: () => ({ nth: () => ({ ok: true }) }),
+      mainFrame: () => ({ url: () => "https://test.example.com" }),
+    } as unknown as Page;
+
+    ensurePageState(page2);
+    expect(handlers2.has("framenavigated")).toBe(true);
+    expect(handlers2.get("framenavigated")?.length).toBe(1);
   });
 });
