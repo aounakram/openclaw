@@ -30,6 +30,7 @@ type BrowserMockBundle = {
   browser: import("playwright-core").Browser;
   browserClose: ReturnType<typeof vi.fn>;
   pages: import("playwright-core").Page[];
+  pageHandlers: Array<Map<string, Array<(...args: unknown[]) => void>>>;
   pageActions: Array<{
     bringToFront: ReturnType<typeof vi.fn>;
     close: ReturnType<typeof vi.fn>;
@@ -43,12 +44,16 @@ function makeBrowser(pages: MockPageSpec[]): BrowserMockBundle {
     bringToFront: vi.fn(async () => {}),
     close: vi.fn(async () => {}),
   }));
+  const pageHandlers = pages.map(() => new Map<string, Array<(...args: unknown[]) => void>>());
 
   const pageObjects = pages.map((spec, index) => {
     const actions = pageActions[index]!;
+    const handlers = pageHandlers[index]!;
     const mainFrame = { url: () => spec.url ?? `https://page-${index + 1}.example` };
     const page = {
-      on: vi.fn(),
+      on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+        handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+      }),
       context: () => context,
       mainFrame: () => mainFrame,
       title: vi.fn(async () => spec.title ?? spec.targetId ?? `page-${index + 1}`),
@@ -74,11 +79,8 @@ function makeBrowser(pages: MockPageSpec[]): BrowserMockBundle {
             throw new Error(spec.targetLookupError);
           }
           if (spec?.navigateDuringTargetLookup) {
-            const on = page.on as unknown as ReturnType<typeof vi.fn>;
-            const navigationHandler = on.mock.calls.find(
-              ([event]) => event === "framenavigated",
-            )?.[1] as ((frame: ReturnType<typeof page.mainFrame>) => void) | undefined;
-            navigationHandler?.(page.mainFrame());
+            const pageIndex = pageObjects.indexOf(page);
+            pageHandlers[pageIndex]?.get("framenavigated")?.[0]?.(page.mainFrame());
           }
           return { targetInfo: { targetId: spec?.targetId } };
         }),
@@ -94,7 +96,7 @@ function makeBrowser(pages: MockPageSpec[]): BrowserMockBundle {
     close: browserClose,
   } as unknown as import("playwright-core").Browser;
 
-  return { browser, browserClose, pages: pageObjects, pageActions };
+  return { browser, browserClose, pages: pageObjects, pageHandlers, pageActions };
 }
 
 function installBrowser(pages: MockPageSpec[]): BrowserMockBundle {
@@ -181,18 +183,15 @@ describe("pw-session getPageForTargetId", () => {
       targetId,
       refs: { e1: { role: "button", name: "Old document" } },
     });
-    installBrowser([{ targetId }]);
-
+    const { pages, pageHandlers } = installBrowser([{ targetId }]);
     const page = await getPageForTargetId({ cdpUrl, targetId });
-    const on = page.on as unknown as ReturnType<typeof vi.fn>;
-    const navigationHandler = on.mock.calls.find(([event]) => event === "framenavigated")?.[1] as
-      | ((frame: ReturnType<typeof page.mainFrame>) => void)
-      | undefined;
+    const navigationHandler = pageHandlers[0]?.get("framenavigated")?.[0];
     navigationHandler?.(page.mainFrame());
     restoreRoleRefsForTarget({ cdpUrl, targetId, page });
 
     expect(navigationHandler).toBeTypeOf("function");
     expect(ensurePageState(page).roleRefs).toBeUndefined();
+    expect(page).toBe(pages[0]);
   });
 
   it("invalidates target refs when navigation races target lookup", async () => {

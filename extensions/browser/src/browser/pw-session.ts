@@ -731,9 +731,9 @@ export function restoreRoleRefsForTarget(opts: {
   if (!targetId) {
     return;
   }
-  const targetKey = roleRefsKey(opts.cdpUrl, targetId);
+  const cacheKey = roleRefsKey(opts.cdpUrl, targetId);
   bindRoleRefsTarget(opts.page, opts.cdpUrl, targetId);
-  const cached = roleRefsByTarget.get(targetKey);
+  const cached = roleRefsByTarget.get(cacheKey);
   if (!cached) {
     return;
   }
@@ -741,7 +741,7 @@ export function restoreRoleRefsForTarget(opts: {
   if (state.roleRefs) {
     return;
   }
-  state.roleRefsTargetKey = targetKey;
+  state.roleRefsTargetKey = cacheKey;
   state.roleRefs = cached.refs;
   state.roleRefsMode = cached.mode;
 }
