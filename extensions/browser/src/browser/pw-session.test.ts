@@ -155,7 +155,6 @@ describe("pw-session role refs cache", () => {
       targetId,
       refs: { e1: { role: "button", name: "OK" } },
       frameSelector: "iframe#main",
-      navGen: 0,
     });
 
     const { page, mocks } = fakePage();
@@ -165,172 +164,55 @@ describe("pw-session role refs cache", () => {
     expect(mocks.frameLocator).toHaveBeenCalledWith("iframe#main");
   });
 
-  it("blocks restore after navigation (target-scoped navGen)", () => {
+  it("invalidates cached refs for replacement Pages after main-frame navigation", () => {
     const cdpUrl = "http://127.0.0.1:9222";
     const targetId = "t1";
 
-    const { page, handlers, mainFrame } = fakePage();
-    // Snapshot stores refs at target gen 0
-    storeRoleRefsForTarget({
-      page,
-      cdpUrl,
-      targetId,
-      refs: { e1: { role: "button", name: "OK" } },
-      mode: "role",
-    });
-
-    // Navigate clears refs and bumps target gen to 1
-    handlers.get("framenavigated")?.[0]?.(mainFrame);
-    expect(ensurePageState(page).roleRefs).toBeUndefined();
-
-    // Restore must reject cached gen-0 refs (target is now at gen 1)
-    restoreRoleRefsForTarget({ cdpUrl, targetId, page });
-    expect(ensurePageState(page).roleRefs).toBeUndefined();
-  });
-
-  it("allows restore for a replacement Page when target gen matches", () => {
-    const cdpUrl = "http://127.0.0.1:9222";
-    const targetId = "t1";
-
-    // Page A: snapshot stores refs at target gen 0
-    const { page: pageA } = fakePage();
-    storeRoleRefsForTarget({
-      page: pageA,
-      cdpUrl,
-      targetId,
-      refs: { e1: { role: "button", name: "OK" } },
-      mode: "role",
-    });
-
-    // Page B (replacement, same target): restore must succeed (both gen 0)
-    const { page: pageB, mocks } = fakePage();
-    restoreRoleRefsForTarget({ cdpUrl, targetId, page: pageB });
-    expect(ensurePageState(pageB).roleRefs).toBeDefined();
-
-    // Verify refLocator works with restored refs
-    refLocator(pageB, "e1");
-    expect(mocks.getByRole).toHaveBeenCalled();
-  });
-
-  it("rejects stale cached refs for a replacement Page after target navigation", () => {
-    const cdpUrl = "http://127.0.0.1:9222";
-    const targetId = "t1";
-
-    // Page A: snapshot stores refs at target gen 0
     const { page: pageA, handlers, mainFrame } = fakePage();
     storeRoleRefsForTarget({
       page: pageA,
       cdpUrl,
       targetId,
-      refs: { e1: { role: "button", name: "PageA-Btn" } },
+      refs: { e1: { role: "button", name: "Page A" } },
       mode: "role",
     });
 
-    // Navigate on Page A → target gen becomes 1, refs cleared
     handlers.get("framenavigated")?.[0]?.(mainFrame);
     expect(ensurePageState(pageA).roleRefs).toBeUndefined();
 
-    // Page B (replacement, same target): restore must reject stale gen-0 cache
     const { page: pageB } = fakePage();
     restoreRoleRefsForTarget({ cdpUrl, targetId, page: pageB });
     expect(ensurePageState(pageB).roleRefs).toBeUndefined();
   });
 
-  it("restores fresh post-navigation cache for a replacement Page", () => {
+  it("restores fresh post-navigation refs for a replacement Page", () => {
     const cdpUrl = "http://127.0.0.1:9222";
     const targetId = "t1";
 
-    // Page A: navigate, then snapshot on the new page caches at target gen 1
     const { page: pageA, handlers, mainFrame } = fakePage();
-    handlers.get("framenavigated")?.[0]?.(mainFrame); // target gen → 1
+    storeRoleRefsForTarget({
+      page: pageA,
+      cdpUrl,
+      targetId,
+      refs: { e1: { role: "button", name: "Page A" } },
+      mode: "role",
+    });
+    handlers.get("framenavigated")?.[0]?.(mainFrame);
 
     storeRoleRefsForTarget({
       page: pageA,
       cdpUrl,
       targetId,
-      refs: { e1: { role: "heading", name: "PageB-Title" } },
+      refs: { e1: { role: "heading", name: "Page B" } },
       mode: "aria",
     });
 
-    // Page B (replacement): restore must succeed (both gen 1)
     const { page: pageB } = fakePage();
     restoreRoleRefsForTarget({ cdpUrl, targetId, page: pageB });
-    expect(ensurePageState(pageB).roleRefs).toBeDefined();
-    expect(ensurePageState(pageB).roleRefs!.e1.name).toBe("PageB-Title");
-  });
-
-  it("evicts target generation alongside role-ref cache eviction", () => {
-    const cdpUrl = "http://127.0.0.1:9222";
-
-    // Bump generation for a target by navigating
-    const { page: pageA, handlers, mainFrame } = fakePage();
-    storeRoleRefsForTarget({
-      page: pageA,
-      cdpUrl,
-      targetId: "keeper",
-      refs: { e1: { role: "button", name: "Keeper" } },
-      mode: "role",
+    expect(ensurePageState(pageB).roleRefs).toEqual({
+      e1: { role: "heading", name: "Page B" },
     });
-    handlers.get("framenavigated")?.[0]?.(mainFrame); // target gen → 1
-
-    // Fill the cache past MAX_ROLE_REFS_CACHE (50) to evict the oldest entry
-    // Each storeRoleRefsForTarget call adds one entry via rememberRoleRefsForTarget
-    for (let i = 0; i < 55; i++) {
-      const { page: filler } = fakePage();
-      storeRoleRefsForTarget({
-        page: filler,
-        cdpUrl,
-        targetId: `filler-${i}`,
-        refs: { e1: { role: "button", name: `F${i}` } },
-        mode: "role",
-      });
-    }
-
-    // The "keeper" entry should have been evicted (it was first in)
-    // After eviction, a new restore for "keeper" should see gen 0 (default)
-    const { page: pageB } = fakePage();
-    restoreRoleRefsForTarget({ cdpUrl, targetId: "keeper", page: pageB });
-    // Evicted → cache miss → restore is a no-op
-    expect(ensurePageState(pageB).roleRefs).toBeUndefined();
-  });
-
-  it("prevents navigation from recreating navGen for evicted targets", () => {
-    const cdpUrl = "http://127.0.0.1:9222";
-
-    // Create a page that tracks target "evictee"
-    const { page, handlers, mainFrame } = fakePage();
-    storeRoleRefsForTarget({
-      page,
-      cdpUrl,
-      targetId: "evictee",
-      refs: { e1: { role: "button", name: "Evictee" } },
-      mode: "role",
-    });
-    // Navigate once — target gen becomes 1
-    handlers.get("framenavigated")?.[0]?.(mainFrame);
-    expect(ensurePageState(page).roleRefs).toBeUndefined();
-
-    // Evict "evictee" by filling the cache
-    for (let i = 0; i < 55; i++) {
-      const { page: filler } = fakePage();
-      storeRoleRefsForTarget({
-        page: filler,
-        cdpUrl,
-        targetId: `filler-${i}`,
-        refs: { e1: { role: "button", name: `F${i}` } },
-        mode: "role",
-      });
-    }
-
-    // Navigate again on the original page — still tracks "evictee" via pageTargetKeys
-    // but "evictee" was evicted from roleRefsByTarget, so no orphan navGen entry
-    // should be created.
-    handlers.get("framenavigated")?.[0]?.(mainFrame);
-
-    // Verify "evictee" is no longer in the cache (evicted)
-    const { page: freshPage } = fakePage();
-    restoreRoleRefsForTarget({ cdpUrl, targetId: "evictee", page: freshPage });
-    expect(ensurePageState(freshPage).roleRefs).toBeUndefined();
+    expect(ensurePageState(pageB).roleRefsMode).toBe("aria");
   });
 });
 
@@ -865,30 +747,10 @@ describe("pw-session ensurePageState", () => {
     expect(state2.requests).toStrictEqual([]);
   });
 
-  it("clears role refs on main-frame navigation (role mode)", () => {
-    const { page, handlers, mainFrame } = fakePage();
-    const state = ensurePageState(page);
-
-    storeRoleRefsForTarget({
-      page,
-      cdpUrl: "http://127.0.0.1:9222",
-      targetId: "t1",
-      refs: { e1: { role: "button", name: "OK" }, e2: { role: "link", name: "Home" } },
-      mode: "role",
-    });
-    expect(state.roleRefs).toBeDefined();
-    expect(Object.keys(state.roleRefs!)).toHaveLength(2);
-    expect(state.roleRefsMode).toBe("role");
-
-    handlers.get("framenavigated")?.[0]?.(mainFrame);
-
-    expect(state.roleRefs).toBeUndefined();
-    expect(state.roleRefsMode).toBeUndefined();
-    expect(state.roleRefsFrameSelector).toBeUndefined();
-    expect(() => refLocator(page, "e1")).toThrow(/Unknown ref/);
-  });
-
-  it("clears role refs on main-frame navigation (aria mode)", () => {
+  it.each([
+    { mode: "role" as const, frameSelector: undefined },
+    { mode: "aria" as const, frameSelector: "iframe#content" },
+  ])("clears $mode role refs on main-frame navigation", ({ mode, frameSelector }) => {
     const { page, handlers, mainFrame } = fakePage();
     const state = ensurePageState(page);
 
@@ -897,35 +759,19 @@ describe("pw-session ensurePageState", () => {
       cdpUrl: "http://127.0.0.1:9222",
       targetId: "t1",
       refs: { e1: { role: "button", name: "Save" } },
-      mode: "aria",
+      frameSelector,
+      mode,
     });
     expect(state.roleRefs).toBeDefined();
-    expect(state.roleRefsMode).toBe("aria");
+    expect(state.roleRefsMode).toBe(mode);
+    expect(state.roleRefsFrameSelector).toBe(frameSelector);
 
     handlers.get("framenavigated")?.[0]?.(mainFrame);
 
     expect(state.roleRefs).toBeUndefined();
     expect(state.roleRefsMode).toBeUndefined();
-    expect(() => refLocator(page, "e1")).toThrow(/Unknown ref/);
-  });
-
-  it("clears roleRefsFrameSelector on main-frame navigation", () => {
-    const { page, handlers, mainFrame } = fakePage();
-    const state = ensurePageState(page);
-
-    storeRoleRefsForTarget({
-      page,
-      cdpUrl: "http://127.0.0.1:9222",
-      targetId: "t1",
-      refs: { e1: { role: "button", name: "OK" } },
-      frameSelector: "iframe#content",
-      mode: "role",
-    });
-    expect(state.roleRefsFrameSelector).toBe("iframe#content");
-
-    handlers.get("framenavigated")?.[0]?.(mainFrame);
-
     expect(state.roleRefsFrameSelector).toBeUndefined();
+    expect(() => refLocator(page, "e1")).toThrow(/Unknown ref/);
   });
 
   it("preserves role refs on subframe navigation", () => {
@@ -973,28 +819,5 @@ describe("pw-session ensurePageState", () => {
     expect(state.roleRefs).toBeDefined();
     expect(state.roleRefs!.e1.role).toBe("heading");
     expect(state.roleRefsMode).toBe("aria");
-  });
-
-  it("registers framenavigated listener on ensurePageState", () => {
-    const handlers2 = new Map<string, Array<(...args: unknown[]) => void>>();
-    const page2 = {
-      on: (event: string, cb: (...args: unknown[]) => void) => {
-        const list = handlers2.get(event) ?? [];
-        list.push(cb);
-        handlers2.set(event, list);
-      },
-      off: () => {},
-      getByRole: () => ({ nth: () => ({ ok: true }) }),
-      frameLocator: () => ({
-        getByRole: () => ({ nth: () => ({ ok: true }) }),
-        locator: () => ({ nth: () => ({ ok: true }) }),
-      }),
-      locator: () => ({ nth: () => ({ ok: true }) }),
-      mainFrame: () => ({ url: () => "https://test.example.com" }),
-    } as unknown as Page;
-
-    ensurePageState(page2);
-    expect(handlers2.has("framenavigated")).toBe(true);
-    expect(handlers2.get("framenavigated")?.length).toBe(1);
   });
 });

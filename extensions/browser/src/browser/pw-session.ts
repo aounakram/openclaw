@@ -183,6 +183,8 @@ type PageState = {
   roleRefs?: Record<string, { role: string; name?: string; nth?: number; domMarker?: boolean }>;
   roleRefsMode?: "role" | "aria";
   roleRefsFrameSelector?: string;
+  /** Target-cache entry owned by the current role refs. */
+  roleRefsTargetKey?: string;
 };
 
 type RoleRefs = NonNullable<PageState["roleRefs"]>;
@@ -190,9 +192,6 @@ type RoleRefsCacheEntry = {
   refs: RoleRefs;
   frameSelector?: string;
   mode?: NonNullable<PageState["roleRefsMode"]>;
-  /** The roleRefNavGen value when these refs were stored.
-   *  Mismatch means the page has navigated since — refs are stale. */
-  navGen: number;
 };
 
 type ContextState = {
@@ -207,17 +206,7 @@ const observedPages = new WeakSet<Page>();
 // Best-effort cache to make role refs stable even if Playwright returns a different Page object
 // for the same CDP target across requests.
 const roleRefsByTarget = new Map<string, RoleRefsCacheEntry>();
-/** Navigation generation shared across all Page objects for the same CDP target.
- *  Bumped on every main-frame navigation so replacement Pages see the same lifecycle. */
-const navGenerationByTarget = new Map<string, number>();
-/** Tracks the last-known (cdpUrl, targetId) key for a Page so framenavigated
- *  listeners can bump the correct target-scoped generation. */
-const pageTargetKeys = new WeakMap<Page, string>();
 const MAX_ROLE_REFS_CACHE = 50;
-
-function targetNavGen(cdpUrl: string, targetId: string): number {
-  return navGenerationByTarget.get(roleRefsKey(cdpUrl, targetId)) ?? 0;
-}
 
 const MAX_CONSOLE_MESSAGES = 500;
 const MAX_PAGE_ERRORS = 200;
@@ -646,7 +635,6 @@ export function rememberRoleRefsForTarget(opts: {
   refs: RoleRefs;
   frameSelector?: string;
   mode?: NonNullable<PageState["roleRefsMode"]>;
-  navGen: number;
 }): void {
   const targetId = normalizeOptionalString(opts.targetId) ?? "";
   if (!targetId) {
@@ -656,16 +644,12 @@ export function rememberRoleRefsForTarget(opts: {
     refs: opts.refs,
     ...(opts.frameSelector ? { frameSelector: opts.frameSelector } : {}),
     ...(opts.mode ? { mode: opts.mode } : {}),
-    navGen: opts.navGen,
   });
   while (roleRefsByTarget.size > MAX_ROLE_REFS_CACHE) {
     const first = roleRefsByTarget.keys().next();
     if (first.done) {
       break;
     }
-    // Evict the target generation alongside the role-ref cache entry
-    // so the unbounded navGenerationByTarget map does not leak memory.
-    navGenerationByTarget.delete(first.value);
     roleRefsByTarget.delete(first.value);
   }
 }
@@ -685,17 +669,16 @@ export function storeRoleRefsForTarget(opts: {
   state.roleRefsMode = opts.mode;
   const targetId = normalizeOptionalString(opts.targetId);
   if (!targetId) {
+    state.roleRefsTargetKey = undefined;
     return;
   }
-  // Track the target key so framenavigated can bump the target-scoped generation.
-  pageTargetKeys.set(opts.page, roleRefsKey(opts.cdpUrl, targetId));
+  state.roleRefsTargetKey = roleRefsKey(opts.cdpUrl, targetId);
   rememberRoleRefsForTarget({
     cdpUrl: opts.cdpUrl,
     targetId,
     refs: opts.refs,
     frameSelector: opts.frameSelector,
     mode: opts.mode,
-    navGen: targetNavGen(opts.cdpUrl, targetId),
   });
 }
 
@@ -709,7 +692,8 @@ export function restoreRoleRefsForTarget(opts: {
   if (!targetId) {
     return;
   }
-  const cached = roleRefsByTarget.get(roleRefsKey(opts.cdpUrl, targetId));
+  const targetKey = roleRefsKey(opts.cdpUrl, targetId);
+  const cached = roleRefsByTarget.get(targetKey);
   if (!cached) {
     return;
   }
@@ -717,14 +701,7 @@ export function restoreRoleRefsForTarget(opts: {
   if (state.roleRefs) {
     return;
   }
-  // Do not restore if the target has navigated since the cached snapshot.
-  // navGen is target-scoped so replacement Page objects share the same lifecycle.
-  if (cached.navGen !== targetNavGen(opts.cdpUrl, targetId)) {
-    return;
-  }
-  // Track the target key so future framenavigated events on this Page can
-  // bump the correct target-scoped generation.
-  pageTargetKeys.set(opts.page, roleRefsKey(opts.cdpUrl, targetId));
+  state.roleRefsTargetKey = targetKey;
   state.roleRefs = cached.refs;
   state.roleRefsFrameSelector = cached.frameSelector;
   state.roleRefsMode = cached.mode;
@@ -853,17 +830,15 @@ export function ensurePageState(page: Page): PageState {
       // previous page are never used to locate elements on the new page.
       // Subframe navigations do not invalidate the main-page snapshot.
       if (frame === page.mainFrame()) {
-        // Bump the target-scoped generation so replacement Page objects
-        // for the same (cdpUrl, targetId) share the same lifecycle.
-        // Only bump if the target is still in the cache — evicted targets
-        // must not recreate orphan navGenerationByTarget entries.
-        const key = pageTargetKeys.get(page);
-        if (key && roleRefsByTarget.has(key)) {
-          navGenerationByTarget.set(key, (navGenerationByTarget.get(key) ?? 0) + 1);
+        // Replacement Page objects restore from this target cache, so local
+        // clearing alone could resurrect refs from the previous document.
+        if (state.roleRefsTargetKey) {
+          roleRefsByTarget.delete(state.roleRefsTargetKey);
         }
         state.roleRefs = undefined;
         state.roleRefsMode = undefined;
         state.roleRefsFrameSelector = undefined;
+        state.roleRefsTargetKey = undefined;
       }
     });
     page.on("close", () => {
