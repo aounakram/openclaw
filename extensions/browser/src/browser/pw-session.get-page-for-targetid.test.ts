@@ -9,6 +9,9 @@ import {
   focusPageByTargetIdViaPlaywright,
   getPageForTargetId,
   listPagesViaPlaywright,
+  rememberRoleRefsForTarget,
+  restoreRoleRefsForTarget,
+  ensurePageState,
   setCdpConnectRetryDelayMsForTests,
 } from "./pw-session.js";
 
@@ -20,6 +23,7 @@ type MockPageSpec = {
   url?: string;
   title?: string;
   targetLookupError?: string;
+  navigateDuringTargetLookup?: boolean;
 };
 
 type BrowserMockBundle = {
@@ -42,9 +46,11 @@ function makeBrowser(pages: MockPageSpec[]): BrowserMockBundle {
 
   const pageObjects = pages.map((spec, index) => {
     const actions = pageActions[index]!;
+    const mainFrame = { url: () => spec.url ?? `https://page-${index + 1}.example` };
     const page = {
       on: vi.fn(),
       context: () => context,
+      mainFrame: () => mainFrame,
       title: vi.fn(async () => spec.title ?? spec.targetId ?? `page-${index + 1}`),
       url: vi.fn(() => spec.url ?? `https://page-${index + 1}.example`),
       bringToFront: actions.bringToFront,
@@ -66,6 +72,13 @@ function makeBrowser(pages: MockPageSpec[]): BrowserMockBundle {
           }
           if (spec?.targetLookupError) {
             throw new Error(spec.targetLookupError);
+          }
+          if (spec?.navigateDuringTargetLookup) {
+            const on = page.on as unknown as ReturnType<typeof vi.fn>;
+            const navigationHandler = on.mock.calls.find(
+              ([event]) => event === "framenavigated",
+            )?.[1] as ((frame: ReturnType<typeof page.mainFrame>) => void) | undefined;
+            navigationHandler?.(page.mainFrame());
           }
           return { targetInfo: { targetId: spec?.targetId } };
         }),
@@ -158,6 +171,44 @@ describe("pw-session getPageForTargetId", () => {
     });
 
     expect(resolved).toBe(pages[1]);
+  });
+
+  it("binds a resolved replacement page to target-cache invalidation", async () => {
+    const cdpUrl = "http://127.0.0.1:18792";
+    const targetId = "TARGET_REPLACED";
+    rememberRoleRefsForTarget({
+      cdpUrl,
+      targetId,
+      refs: { e1: { role: "button", name: "Old document" } },
+    });
+    installBrowser([{ targetId }]);
+
+    const page = await getPageForTargetId({ cdpUrl, targetId });
+    const on = page.on as unknown as ReturnType<typeof vi.fn>;
+    const navigationHandler = on.mock.calls.find(([event]) => event === "framenavigated")?.[1] as
+      | ((frame: ReturnType<typeof page.mainFrame>) => void)
+      | undefined;
+    navigationHandler?.(page.mainFrame());
+    restoreRoleRefsForTarget({ cdpUrl, targetId, page });
+
+    expect(navigationHandler).toBeTypeOf("function");
+    expect(ensurePageState(page).roleRefs).toBeUndefined();
+  });
+
+  it("invalidates target refs when navigation races target lookup", async () => {
+    const cdpUrl = "http://127.0.0.1:18792";
+    const targetId = "TARGET_RACE";
+    rememberRoleRefsForTarget({
+      cdpUrl,
+      targetId,
+      refs: { e1: { role: "button", name: "Old document" } },
+    });
+    installBrowser([{ targetId, navigateDuringTargetLookup: true }]);
+
+    const page = await getPageForTargetId({ cdpUrl, targetId });
+    restoreRoleRefsForTarget({ cdpUrl, targetId, page });
+
+    expect(ensurePageState(page).roleRefs).toBeUndefined();
   });
 
   it("focuses and closes only the exact target when URLs are identical", async () => {

@@ -1,7 +1,7 @@
 // Browser tests cover pw session plugin behavior.
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { Page } from "playwright-core";
+import type { Frame, Page } from "playwright-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_DOWNLOAD_DIR } from "./paths.js";
 import { createDownloadCaptureForPage } from "./pw-download-capture.js";
@@ -31,8 +31,11 @@ function fakePage(): {
   page: Page;
   handlers: Map<string, Array<(...args: unknown[]) => void>>;
   mainFrame: { url: () => string };
+  selectedFrame: Frame;
   mocks: {
     on: ReturnType<typeof vi.fn>;
+    frameGetByRole: ReturnType<typeof vi.fn>;
+    frameQuery: ReturnType<typeof vi.fn>;
     getByRole: ReturnType<typeof vi.fn>;
     frameLocator: ReturnType<typeof vi.fn>;
     locator: ReturnType<typeof vi.fn>;
@@ -58,7 +61,19 @@ function fakePage(): {
     getByRole: vi.fn(() => ({ nth: vi.fn(() => ({ ok: true })) })),
     locator: vi.fn(() => ({ nth: vi.fn(() => ({ ok: true })) })),
   }));
-  const locator = vi.fn(() => ({ nth: vi.fn(() => ({ ok: true })) }));
+  const frameGetByRole = vi.fn(() => ({ nth: vi.fn(() => ({ ok: true })) }));
+  const frameQuery = vi.fn(() => ({ nth: vi.fn(() => ({ ok: true })) }));
+  const selectedFrame = {
+    url: () => "https://frame.example.com",
+    getByRole: frameGetByRole,
+    locator: frameQuery,
+  } as unknown as Frame;
+  const locator = vi.fn(() => ({
+    nth: vi.fn(() => ({ ok: true })),
+    elementHandle: vi.fn(async () => ({
+      contentFrame: vi.fn(async () => selectedFrame),
+    })),
+  }));
 
   const mainFrame = { url: () => "https://test.example.com" };
   const page = {
@@ -70,7 +85,13 @@ function fakePage(): {
     mainFrame: () => mainFrame,
   } as unknown as Page;
 
-  return { page, handlers, mainFrame, mocks: { on, getByRole, frameLocator, locator } };
+  return {
+    page,
+    handlers,
+    mainFrame,
+    selectedFrame,
+    mocks: { on, frameGetByRole, frameQuery, getByRole, frameLocator, locator },
+  };
 }
 
 function firstSavePath(saveAs: MutableDownload["saveAs"]): string {
@@ -86,15 +107,20 @@ function firstSavePath(saveAs: MutableDownload["saveAs"]): string {
 }
 
 describe("pw-session refLocator", () => {
-  it("uses frameLocator for role refs when snapshot was scoped to a frame", () => {
-    const { page, mocks } = fakePage();
+  it("uses the captured Frame for refs from a frame-scoped snapshot", () => {
+    const { page, selectedFrame, mocks } = fakePage();
     const state = ensurePageState(page);
     state.roleRefs = { e1: { role: "button", name: "OK" } };
     state.roleRefsFrameSelector = "iframe#main";
+    state.roleRefsFrame = selectedFrame;
 
     refLocator(page, "e1");
 
-    expect(mocks.frameLocator).toHaveBeenCalledWith("iframe#main");
+    expect(mocks.frameGetByRole).toHaveBeenCalledWith("button", {
+      name: "OK",
+      exact: true,
+    });
+    expect(mocks.frameLocator).not.toHaveBeenCalled();
   });
 
   it("uses page getByRole for role refs by default", () => {
@@ -146,7 +172,7 @@ describe("pw-session refLocator", () => {
 });
 
 describe("pw-session role refs cache", () => {
-  it("restores refs for a different Page instance (same CDP targetId)", () => {
+  it("restores unscoped refs for a different Page instance", () => {
     const cdpUrl = "http://127.0.0.1:9222";
     const targetId = "t1";
 
@@ -154,14 +180,31 @@ describe("pw-session role refs cache", () => {
       cdpUrl,
       targetId,
       refs: { e1: { role: "button", name: "OK" } },
-      frameSelector: "iframe#main",
+      mode: "role",
     });
 
     const { page, mocks } = fakePage();
     restoreRoleRefsForTarget({ cdpUrl, targetId, page });
 
     refLocator(page, "e1");
-    expect(mocks.frameLocator).toHaveBeenCalledWith("iframe#main");
+    expect(mocks.getByRole).toHaveBeenCalled();
+  });
+
+  it("does not restore frame-scoped refs onto a replacement Page", () => {
+    const cdpUrl = "http://127.0.0.1:9222";
+    const targetId = "frame-target";
+    rememberRoleRefsForTarget({
+      cdpUrl,
+      targetId,
+      refs: { e1: { role: "button", name: "Old frame" } },
+      frameSelector: "iframe#main",
+      mode: "role",
+    });
+
+    const { page } = fakePage();
+    restoreRoleRefsForTarget({ cdpUrl, targetId, page });
+
+    expect(ensurePageState(page).roleRefs).toBeUndefined();
   });
 
   it("invalidates cached refs for replacement Pages after main-frame navigation", () => {
@@ -751,7 +794,7 @@ describe("pw-session ensurePageState", () => {
     { mode: "role" as const, frameSelector: undefined },
     { mode: "aria" as const, frameSelector: "iframe#content" },
   ])("clears $mode role refs on main-frame navigation", ({ mode, frameSelector }) => {
-    const { page, handlers, mainFrame } = fakePage();
+    const { page, handlers, mainFrame, selectedFrame } = fakePage();
     const state = ensurePageState(page);
 
     storeRoleRefsForTarget({
@@ -760,6 +803,7 @@ describe("pw-session ensurePageState", () => {
       targetId: "t1",
       refs: { e1: { role: "button", name: "Save" } },
       frameSelector,
+      frame: frameSelector ? selectedFrame : undefined,
       mode,
     });
     expect(state.roleRefs).toBeDefined();
@@ -793,6 +837,31 @@ describe("pw-session ensurePageState", () => {
     expect(state.roleRefs).toBeDefined();
     expect(Object.keys(state.roleRefs!)).toHaveLength(1);
   });
+
+  it.each(["framenavigated", "framedetached"] as const)(
+    "clears frame-scoped role refs on %s",
+    (event) => {
+      const { page, handlers, selectedFrame } = fakePage();
+      const state = ensurePageState(page);
+
+      storeRoleRefsForTarget({
+        page,
+        cdpUrl: "http://127.0.0.1:9222",
+        targetId: "t1",
+        refs: { e1: { role: "button", name: "Inside frame" } },
+        frameSelector: "iframe#content",
+        frame: selectedFrame,
+        mode: "role",
+      });
+
+      handlers.get(event)?.[0]?.({ url: () => "https://ads.example.com" });
+      expect(state.roleRefs).toBeDefined();
+
+      handlers.get(event)?.[0]?.(selectedFrame);
+      expect(state.roleRefs).toBeUndefined();
+      expect(state.roleRefsFrameSelector).toBeUndefined();
+    },
+  );
 
   it("allows new snapshot to store fresh refs after navigation clear", () => {
     const { page, handlers, mainFrame } = fakePage();
